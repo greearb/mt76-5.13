@@ -10,34 +10,6 @@
 #include "mcu.h"
 #include "eeprom.h"
 
-#define CCK_RATE(_idx, _rate) {						\
-	.bitrate = _rate,						\
-	.flags = IEEE80211_RATE_SHORT_PREAMBLE,				\
-	.hw_value = (MT_PHY_TYPE_CCK << 8) | (_idx),			\
-	.hw_value_short = (MT_PHY_TYPE_CCK << 8) | (4 + (_idx)),	\
-}
-
-#define OFDM_RATE(_idx, _rate) {					\
-	.bitrate = _rate,						\
-	.hw_value = (MT_PHY_TYPE_OFDM << 8) | (_idx),			\
-	.hw_value_short = (MT_PHY_TYPE_OFDM << 8) | (_idx),		\
-}
-
-static struct ieee80211_rate mt7915_rates[] = {
-	CCK_RATE(0, 10),
-	CCK_RATE(1, 20),
-	CCK_RATE(2, 55),
-	CCK_RATE(3, 110),
-	OFDM_RATE(11, 60),
-	OFDM_RATE(15, 90),
-	OFDM_RATE(10, 120),
-	OFDM_RATE(14, 180),
-	OFDM_RATE(9,  240),
-	OFDM_RATE(13, 360),
-	OFDM_RATE(8,  480),
-	OFDM_RATE(12, 540),
-};
-
 static const struct ieee80211_iface_limit if_limits[] = {
 	{
 		.max = 1,
@@ -146,6 +118,9 @@ static void mt7915_unregister_thermal(struct mt7915_phy *phy)
 {
 	struct wiphy *wiphy = phy->mt76->hw->wiphy;
 
+	if (!phy->cdev)
+	    return;
+
 	sysfs_remove_link(&wiphy->dev.kobj, "cooling_device");
 	thermal_cooling_device_unregister(phy->cdev);
 }
@@ -155,19 +130,16 @@ static int mt7915_thermal_init(struct mt7915_phy *phy)
 	struct wiphy *wiphy = phy->mt76->hw->wiphy;
 	struct thermal_cooling_device *cdev;
 	struct device *hwmon;
-	int ret = 0;
 
 	cdev = thermal_cooling_device_register(wiphy_name(wiphy), phy,
 					       &mt7915_thermal_ops);
-	if (IS_ERR(cdev))
-		return PTR_ERR(cdev);
-
-	ret = sysfs_create_link(&wiphy->dev.kobj, &cdev->device.kobj,
-				"cooling_device");
-	if (ret)
-		goto err;
-
-	phy->cdev = cdev;
+	if (!IS_ERR(cdev)) {
+		if (sysfs_create_link(&wiphy->dev.kobj, &cdev->device.kobj,
+				      "cooling_device") < 0)
+			thermal_cooling_device_unregister(cdev);
+		else
+			phy->cdev = cdev;
+	}
 
 	if (!IS_REACHABLE(CONFIG_HWMON))
 		return 0;
@@ -175,16 +147,10 @@ static int mt7915_thermal_init(struct mt7915_phy *phy)
 	hwmon = devm_hwmon_device_register_with_groups(&wiphy->dev,
 						       wiphy_name(wiphy), phy,
 						       mt7915_hwmon_groups);
-	if (IS_ERR(hwmon)) {
-		ret = PTR_ERR(hwmon);
-		goto err;
-	}
+	if (IS_ERR(hwmon))
+		return PTR_ERR(hwmon);
 
 	return 0;
-
-err:
-	mt7915_unregister_thermal(phy);
-	return ret;
 }
 
 static void
@@ -275,9 +241,6 @@ mt7915_init_wiphy(struct ieee80211_hw *hw)
 
 	hw->max_tx_fragments = 4;
 
-	if (!phy->dev->dbdc_support)
-		wiphy->txq_memory_limit = 32 << 20; /* 32 MiB */
-
 	if (phy->mt76->cap.has_2ghz)
 		phy->mt76->sband_2g.sband.ht_cap.cap |=
 			IEEE80211_HT_CAP_LDPC_CODING |
@@ -350,20 +313,19 @@ static int mt7915_txbf_init(struct mt7915_dev *dev)
 {
 	int ret;
 
-
 	if (dev->dbdc_support) {
-		ret = mt7915_mcu_set_txbf_module(dev);
+		ret = mt7915_mcu_set_txbf(dev, MT_BF_MODULE_UPDATE);
 		if (ret)
 			return ret;
 	}
 
 	/* trigger sounding packets */
-	ret = mt7915_mcu_set_txbf_sounding(dev);
+	ret = mt7915_mcu_set_txbf(dev, MT_BF_SOUNDING_ON);
 	if (ret)
 		return ret;
 
 	/* enable eBF */
-	return mt7915_mcu_set_txbf_type(dev);
+	return mt7915_mcu_set_txbf(dev, MT_BF_TYPE_UPDATE);
 }
 
 static int mt7915_register_ext_phy(struct mt7915_dev *dev)
@@ -403,8 +365,8 @@ static int mt7915_register_ext_phy(struct mt7915_dev *dev)
 	if (ret)
 		goto error;
 
-	ret = mt76_register_phy(mphy, true, mt7915_rates,
-				ARRAY_SIZE(mt7915_rates));
+	ret = mt76_register_phy(mphy, true, mt76_rates,
+				ARRAY_SIZE(mt76_rates));
 	if (ret)
 		goto error;
 
@@ -606,6 +568,9 @@ mt7915_set_stream_he_txbf_caps(struct ieee80211_sta_he_cap *he_cap,
 	if (nss < 2)
 		return;
 
+	/* the maximum cap is 4 x 3, (Nr, Nc) = (3, 2) */
+	elem->phy_cap_info[7] |= min_t(int, nss - 1, 2) << 3;
+
 	if (vif != NL80211_IFTYPE_AP)
 		return;
 
@@ -619,9 +584,6 @@ mt7915_set_stream_he_txbf_caps(struct ieee80211_sta_he_cap *he_cap,
 	c = IEEE80211_HE_PHY_CAP6_TRIG_SU_BEAMFORMING_FB |
 	    IEEE80211_HE_PHY_CAP6_TRIG_MU_BEAMFORMING_PARTIAL_BW_FB;
 	elem->phy_cap_info[6] |= c;
-
-	/* the maximum cap is 4 x 3, (Nr, Nc) = (3, 2) */
-	elem->phy_cap_info[7] |= min_t(int, nss - 1, 2) << 3;
 }
 
 static void
@@ -705,8 +667,6 @@ mt7915_init_he_caps(struct mt7915_phy *phy, enum nl80211_band band,
 
 		switch (i) {
 		case NL80211_IFTYPE_AP:
-			he_cap_elem->mac_cap_info[0] |=
-				IEEE80211_HE_MAC_CAP0_TWT_RES;
 			he_cap_elem->mac_cap_info[2] |=
 				IEEE80211_HE_MAC_CAP2_BSR;
 			he_cap_elem->mac_cap_info[4] |=
@@ -720,8 +680,6 @@ mt7915_init_he_caps(struct mt7915_phy *phy, enum nl80211_band band,
 				IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT;
 			break;
 		case NL80211_IFTYPE_STATION:
-			he_cap_elem->mac_cap_info[0] |=
-				IEEE80211_HE_MAC_CAP0_TWT_REQ;
 			he_cap_elem->mac_cap_info[1] |=
 				IEEE80211_HE_MAC_CAP1_TF_MAC_PAD_DUR_16US;
 
@@ -858,8 +816,8 @@ int mt7915_register_device(struct mt7915_dev *dev)
 	dev->mt76.test_ops = &mt7915_testmode_ops;
 #endif
 
-	ret = mt76_register_device(&dev->mt76, true, mt7915_rates,
-				   ARRAY_SIZE(mt7915_rates));
+	ret = mt76_register_device(&dev->mt76, true, mt76_rates,
+				   ARRAY_SIZE(mt76_rates));
 	if (ret)
 		return ret;
 

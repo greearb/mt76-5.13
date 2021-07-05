@@ -51,7 +51,7 @@ int mt76_get_of_eeprom(struct mt76_dev *dev, void *eep, int offset, int len)
 		goto out_put_node;
 	}
 
-	offset += be32_to_cpup(list);
+	offset = be32_to_cpup(list);
 	ret = mtd_read(mtd, offset, len, &retlen, eep);
 	put_mtd_device(mtd);
 	if (ret)
@@ -90,16 +90,9 @@ void
 mt76_eeprom_override(struct mt76_phy *phy)
 {
 	struct mt76_dev *dev = phy->dev;
-
-#ifdef CONFIG_OF
 	struct device_node *np = dev->dev->of_node;
-	const u8 *mac = NULL;
 
-	if (np)
-		mac = of_get_mac_address(np);
-	if (!IS_ERR_OR_NULL(mac))
-		ether_addr_copy(phy->macaddr, mac);
-#endif
+	of_get_mac_address(np, phy->macaddr);
 
 	if (!is_valid_ether_addr(phy->macaddr)) {
 		eth_random_addr(phy->macaddr);

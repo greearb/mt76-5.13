@@ -83,6 +83,22 @@ static const struct ieee80211_tpt_blink mt76_tpt_blink[] = {
 	{ .throughput = 300 * 1024, .blink_time =  50 },
 };
 
+struct ieee80211_rate mt76_rates[] = {
+	CCK_RATE(0, 10),
+	CCK_RATE(1, 20),
+	CCK_RATE(2, 55),
+	CCK_RATE(3, 110),
+	OFDM_RATE(11, 60),
+	OFDM_RATE(15, 90),
+	OFDM_RATE(10, 120),
+	OFDM_RATE(14, 180),
+	OFDM_RATE(9,  240),
+	OFDM_RATE(13, 360),
+	OFDM_RATE(8,  480),
+	OFDM_RATE(12, 540),
+};
+EXPORT_SYMBOL_GPL(mt76_rates);
+
 static int mt76_led_init(struct mt76_dev *dev)
 {
 	struct device_node *np = dev->dev->of_node;
@@ -643,20 +659,19 @@ void mt76_update_survey_active_time(struct mt76_phy *phy, ktime_t time)
 }
 EXPORT_SYMBOL_GPL(mt76_update_survey_active_time);
 
-void mt76_update_survey(struct mt76_dev *dev)
+void mt76_update_survey(struct mt76_phy *phy)
 {
+	struct mt76_dev *dev = phy->dev;
 	ktime_t cur_time;
 
 	if (dev->drv->update_survey)
-		dev->drv->update_survey(dev);
+		dev->drv->update_survey(phy);
 
 	cur_time = ktime_get_boottime();
-	mt76_update_survey_active_time(&dev->phy, cur_time);
-	if (dev->phy2)
-		mt76_update_survey_active_time(dev->phy2, cur_time);
+	mt76_update_survey_active_time(phy, cur_time);
 
 	if (dev->drv->drv_flags & MT_DRV_SW_RX_AIRTIME) {
-		struct mt76_channel_state *state = dev->phy.chan_state;
+		struct mt76_channel_state *state = phy->chan_state;
 
 		spin_lock_bh(&dev->cc_lock);
 		state->cc_bss_rx += dev->cur_cc_bss_rx;
@@ -675,7 +690,7 @@ void mt76_set_channel(struct mt76_phy *phy)
 	int timeout = HZ / 5;
 
 	wait_event_timeout(dev->tx_wait, !mt76_has_tx_pending(phy), timeout);
-	mt76_update_survey(dev);
+	mt76_update_survey(phy);
 
 	phy->chandef = *chandef;
 	phy->chan_state = mt76_channel_state(phy, chandef->chan);
@@ -700,7 +715,7 @@ int mt76_get_survey(struct ieee80211_hw *hw, int idx,
 
 	mutex_lock(&dev->mutex);
 	if (idx == 0 && dev->drv->update_survey)
-		mt76_update_survey(dev);
+		mt76_update_survey(phy);
 
 	sband = &phy->sband_2g;
 	if (idx >= sband->sband.n_channels) {
